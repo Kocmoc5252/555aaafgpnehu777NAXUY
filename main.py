@@ -255,21 +255,30 @@ class SglypaChannelBot:
 
         if action == "send_random":
             sent = await self.send_random_text()
-            await self.api.send_message(chat_id, f"Улетело: {sent}", reply_markup=owner_keyboard(self.state.enabled))
+            if sent:
+                await self.api.send_message(chat_id, f"Улетело: {sent}", reply_markup=owner_keyboard(self.state.enabled))
+            else:
+                await self.api.send_message(chat_id, "Память пустая: сначала нужны слова из канала.", reply_markup=owner_keyboard(self.state.enabled))
         elif action == "ask_tag":
             self.state.set_owner_mode(self.config.owner_id, "await_tag")
             self.state.save()
             await self.api.send_message(chat_id, "Кого тегнуть? Пришли @username или любой текст.")
         elif action == "send_meme":
             path = await self.send_random_meme()
-            await self.api.send_message(chat_id, f"Мем отправлен: {Path(path).name}", reply_markup=owner_keyboard(self.state.enabled))
+            if path:
+                await self.api.send_message(chat_id, f"Мем отправлен: {Path(path).name}", reply_markup=owner_keyboard(self.state.enabled))
+            else:
+                await self.api.send_message(chat_id, "Мем не отправлен: памяти пока мало.", reply_markup=owner_keyboard(self.state.enabled))
         elif action == "ask_post":
             self.state.set_owner_mode(self.config.owner_id, "await_post")
             self.state.save()
             await self.api.send_message(chat_id, "Пришли текст, который бот напишет в канал.")
         elif action == "send_poll":
             question = await self.send_random_poll()
-            await self.api.send_message(chat_id, f"Опрос отправлен: {question}", reply_markup=owner_keyboard(self.state.enabled))
+            if question:
+                await self.api.send_message(chat_id, f"Опрос отправлен: {question}", reply_markup=owner_keyboard(self.state.enabled))
+            else:
+                await self.api.send_message(chat_id, "Опрос не отправлен: памяти пока мало.", reply_markup=owner_keyboard(self.state.enabled))
         elif action == "react_last":
             ok = await self.react_to_last_post()
             await self.api.send_message(chat_id, "Реакция поставлена." if ok else "Не вышло поставить реакцию.", reply_markup=owner_keyboard(self.state.enabled))
@@ -310,10 +319,14 @@ class SglypaChannelBot:
     async def owner_send_tagged(self, tag: str, chat_id: int) -> None:
         tag = tag.strip()[:80]
         if not tag:
-            tag = "@admin"
+            await self.api.send_message(chat_id, "Пришли тег или /cancel.")
+            return
         async with self.brain_lock:
             text = self.brain.generate_sentence(min_words=3, max_words=13)
             self.brain.save()
+        if not text.strip():
+            await self.api.send_message(chat_id, "Память пустая: сначала нужны слова из канала.")
+            return
         full_text = f"{tag} {text}"[:4096]
         await self.send_channel_message(full_text)
         self.state.set_owner_mode(self.config.owner_id, None)
@@ -348,9 +361,11 @@ class SglypaChannelBot:
             self.state.save()
         return sent
 
-    async def send_random_text(self, *, reply_to_message_id: int | None = None, tagged: bool = False) -> str:
+    async def send_random_text(self, *, reply_to_message_id: int | None = None, tagged: bool = False) -> str | None:
         async with self.brain_lock:
             text = self.brain.generate_sentence(min_words=3, max_words=13)
+            if not text.strip():
+                return None
             if tagged:
                 tag = self.brain.random_admin_label(prefer_username=True)
                 if tag:
@@ -359,7 +374,7 @@ class SglypaChannelBot:
         await self.send_channel_message(text, reply_to_message_id=reply_to_message_id)
         return text
 
-    async def send_random_meme(self, *, source_text: str | None = None, reply_to_message_id: int | None = None) -> Path:
+    async def send_random_meme(self, *, source_text: str | None = None, reply_to_message_id: int | None = None) -> Path | None:
         async with self.brain_lock:
             if source_text:
                 word_count = len(tokenize(source_text))
@@ -370,6 +385,8 @@ class SglypaChannelBot:
                     meme_text = self.brain.random_words_from_text(recent)
                 else:
                     meme_text = self.brain.generate_sentence(min_words=3, max_words=13)
+            if not meme_text.strip():
+                return None
             self.brain.mark_meme_generated()
             self.brain.save()
 
@@ -377,7 +394,7 @@ class SglypaChannelBot:
         sent = await self.api.send_photo(
             self.config.channel_id,
             path,
-            caption=random.choice([None, "мем", "держите", "я старался", "без комментариев"]),
+            caption=None,
             reply_to_message_id=reply_to_message_id,
         )
         if message_id := sent.get("message_id"):
@@ -385,9 +402,11 @@ class SglypaChannelBot:
             self.state.save()
         return path
 
-    async def send_random_poll(self) -> str:
+    async def send_random_poll(self) -> str | None:
         async with self.brain_lock:
             question = self.brain.generate_sentence(min_words=3, max_words=9).rstrip(".!?) ")
+            if not question.strip():
+                return None
             if not question.endswith("?"):
                 question += "?"
 
@@ -398,16 +417,19 @@ class SglypaChannelBot:
             while len(options) < options_count and attempts < 40:
                 attempts += 1
                 option = self.brain.generate_sentence(min_words=1, max_words=4, add_emoji=random.random() < 0.25)
-                option = option.strip(".!? ")[:100] or self.brain.random_emoji()
+                option = option.strip(".!? ")[:100]
+                if not option:
+                    continue
                 key = option.lower()
                 if key in seen:
                     continue
                 seen.add(key)
                 options.append({"text": option})
-            while len(options) < 2:
-                options.append({"text": random.choice(["да", "нет", "ну типа", "сам не знаю"])})
+            if len(options) < 2:
+                return None
 
             description = self.brain.generate_sentence(min_words=4, max_words=14) if random.random() < 0.65 else None
+            description = description if description and description.strip() else None
             self.brain.mark_poll_generated()
             self.brain.save()
 
