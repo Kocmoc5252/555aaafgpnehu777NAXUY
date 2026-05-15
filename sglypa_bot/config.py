@@ -79,7 +79,13 @@ def load_config() -> Config:
     idle_min = max(30, _env_int("IDLE_MIN_SECONDS", 240))
     idle_max = max(idle_min, _env_int("IDLE_MAX_SECONDS", 900))
 
-    font_path = _env_str("FONT_PATH", "") or None
+    raw_font_path = _env_str("FONT_PATH", "")
+    font_path = None
+    if raw_font_path:
+        path = Path(raw_font_path)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        font_path = str(path)
 
     return Config(
         bot_token=token,
