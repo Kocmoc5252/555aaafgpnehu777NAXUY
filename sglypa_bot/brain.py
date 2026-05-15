@@ -216,17 +216,9 @@ class Brain:
         return text
 
     def fallback_sentence(self, *, add_emoji: bool = True) -> str:
-        samples = [
-            "я пока пустой но уже странный",
-            "канал молчит а я учусь",
-            "сглыпный режим включен",
-            "мне нужны слова срочно",
-            "нейросеть на минималках проснулась",
-        ]
-        text = random.choice(samples)
-        if add_emoji:
-            text = self.maybe_add_emoji(text)
-        return text
+        # Публичный контент не должен брать слова из заготовок.
+        # Если память пустая, вызывающий код просто ничего не отправит в канал.
+        return ""
 
     def maybe_add_emoji(self, text: str, *, chance: float = 0.42) -> str:
         if random.random() > chance:
