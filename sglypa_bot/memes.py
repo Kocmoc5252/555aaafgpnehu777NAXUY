@@ -101,7 +101,7 @@ class MemeGenerator:
     def _prepare_text(self, text: str) -> str:
         text = clean_text(text)
         if not text:
-            text = "сделал мем как смог"
+            raise ValueError("empty meme text")
         if len(text) > 180:
             text = text[:177].rstrip() + "..."
         return text
