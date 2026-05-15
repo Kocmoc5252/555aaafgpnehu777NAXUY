@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "word_counts": {
+    "э": 9,
+    "а": 2,
+    "сука": 1,
+    "хд": 1,
+    "рекод": 1,
+    "ук": 1,
+    "ап": 1,
+    "п": 2,
+    "вап": 1,
+    "ы": 1,
+    "пфу": 1,
+    "фукп": 1,
+    "вот": 1,
+    "реакции": 1,
+    "ставит": 1,
+    "я": 1,
+    "пидорас": 1,
+    "нахуй": 1,
+    "пока": 1,
+    "тупой": 1,
+    "бля": 1,
+    "привей": 1,
+    "умный": 1,
+    "так": 1,
+    "норм": 1,
+    "не": 2,
+    "он": 1,
+    "пишет": 1,
+    "супер": 1,
+    "часто": 1
+  },
+  "transitions": {
+    "а": {
+      "а": 1
+    },
+    "сука": {
+      "хд": 1
+    },
+    "вот": {
+      "реакции": 1
+    },
+    "реакции": {
+      "ставит": 1
+    },
+    "я": {
+      "пидорас": 1
+    },
+    "пидорас": {
+      "нахуй": 1
+    },
+    "пока": {
+      "тупой": 1
+    },
+    "привей": {
+      "умный": 1
+    },
+    "так": {
+      "норм": 1
+    },
+    "норм": {
+      "не": 1
+    },
+    "не": {
+      "он": 1,
+      "пишет": 1
+    },
+    "он": {
+      "не": 1
+    },
+    "пишет": {
+      "супер": 1
+    },
+    "супер": {
+      "часто": 1
+    }
+  },
+  "recent_messages": [
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19843,
+      "ts": 1778875691
+    },
+    {
+      "text": "а а",
+      "source_label": "kocmoc",
+      "message_id": 19844,
+      "ts": 1778875693
+    },
+    {
+      "text": "сука хд",
+      "source_label": "kocmoc",
+      "message_id": 19846,
+      "ts": 1778875717
+    },
+    {
+      "text": "рекод✅",
+      "source_label": "kocmoc",
+      "message_id": 19847,
+      "ts": 1778875739
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19848,
+      "ts": 1778875746
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19849,
+      "ts": 1778875746
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19850,
+      "ts": 1778875746
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19851,
+      "ts": 1778875746
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19852,
+      "ts": 1778875746
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19853,
+      "ts": 1778875747
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19854,
+      "ts": 1778875747
+    },
+    {
+      "text": "э",
+      "source_label": "kocmoc",
+      "message_id": 19855,
+      "ts": 1778875748
+    },
+    {
+      "text": "ук",
+      "source_label": "kocmoc",
+      "message_id": 19856,
+      "ts": 1778875749
+    },
+    {
+      "text": "ап",
+      "source_label": "kocmoc",
+      "message_id": 19857,
+      "ts": 1778875749
+    },
+    {
+      "text": "п",
+      "source_label": "kocmoc",
+      "message_id": 19858,
+      "ts": 1778875749
+    },
+    {
+      "text": "вап",
+      "source_label": "kocmoc",
+      "message_id": 19859,
+      "ts": 1778875750
+    },
+    {
+      "text": "ы",
+      "source_label": "kocmoc",
+      "message_id": 19860,
+      "ts": 1778875750
+    },
+    {
+      "text": "пфу",
+      "source_label": "kocmoc",
+      "message_id": 19861,
+      "ts": 1778875750
+    },
+    {
+      "text": "п",
+      "source_label": "kocmoc",
+      "message_id": 19862,
+      "ts": 1778875750
+    },
+    {
+      "text": "фукп",
+      "source_label": "kocmoc",
+      "message_id": 19863,
+      "ts": 1778875750
+    },
+    {
+      "text": "вот реакции ставит",
+      "source_label": "kocmoc",
+      "message_id": 19864,
+      "ts": 1778875776
+    },
+    {
+      "text": "Я ПИДОРАС НАХУЙ",
+      "source_label": "owner_panel",
+      "message_id": null,
+      "ts": 1778875835
+    },
+    {
+      "text": "пока тупой",
+      "source_label": "kocmoc",
+      "message_id": 19867,
+      "ts": 1778875858
+    },
+    {
+      "text": "бля",
+      "source_label": "kocmoc",
+      "message_id": 19868,
+      "ts": 1778875867
+    },
+    {
+      "text": "привей умный",
+      "source_label": "kocmoc",
+      "message_id": 19870,
+      "ts": 1778875884
+    },
+    {
+      "text": "так норм не он не пишет супер часто",
+      "source_label": "kocmoc",
+      "message_id": 19871,
+      "ts": 1778875905
+    }
+  ],
+  "admin_aliases": {
+    "@marcusgotbenz": 2,
+    "@rybakov555": 2,
+    "@Great_Corgi": 2,
+    "@L0M0NOSOV": 2,
+    "@neoximo": 2,
+    "@sav_daniil": 2,
+    "@i_mitated": 2,
+    "@maxvasyukovmodnik": 2,
+    "@SoulsLike2": 2,
+    "@zelenograd933": 2,
+    "@minecraftgivesword": 2,
+    "@Phil0phibia": 2,
+    "@pivnoymamonov": 2,
+    "@im_dabrabraa": 2,
+    "@meralenat": 2,
+    "@vvcheq": 2,
+    "@semf9t": 2,
+    "@atonastoga": 2,
+    "@D1OR1SOOO": 2,
+    "@xdersax": 2,
+    "@codespaster": 2,
+    "@Casio_888": 2,
+    "Arkady Zhopa": 2,
+    "@Fawat4": 2,
+    "@Mrpipiskin2001": 2,
+    "kocmoc": 25,
+    "owner_panel": 1
+  },
+  "stats": {
+    "messages_seen": 26,
+    "words_seen": 41,
+    "generated_messages": 3,
+    "generated_memes": 2,
+    "generated_polls": 1,
+    "reactions_set": 4
+  }
+}
