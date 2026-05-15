@@ -80,6 +80,8 @@ class Brain:
         self.path = path
         self.max_recent_messages = max_recent_messages
         self.data = self._load()
+        if self.data.pop("_needs_save_after_migration", False):
+            self.save()
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -88,9 +90,91 @@ class Brain:
             payload = json.load(fh)
         base = self._empty()
         base.update(payload)
-        for key, value in base["stats"].items():
+        base.setdefault("stats", {})
+        for key, value in self._empty()["stats"].items():
+            base["stats"].setdefault(key, value)
+        for key, value in list(base["stats"].items()):
             base["stats"][key] = int(value or 0)
+
+        # Если в JSON уже есть старые сообщения, но нет индекса слов,
+        # пересобираем word_counts/transitions автоматически.
+        # Такое бывает после смены версии бота или ручного переноса памяти.
+        if not base.get("word_counts"):
+            rebuilt = self._rebuild_indexes_from_stored_texts(base)
+            if rebuilt:
+                base["_needs_save_after_migration"] = True
         return base
+
+    def _stored_texts(self, payload: dict[str, Any]) -> list[str]:
+        texts: list[str] = []
+        possible_keys = (
+            "recent_messages",
+            "messages",
+            "history",
+            "texts",
+            "learned_messages",
+            "channel_messages",
+        )
+        for key in possible_keys:
+            value = payload.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if isinstance(item, str):
+                    text = item
+                elif isinstance(item, dict):
+                    text = str(
+                        item.get("text")
+                        or item.get("caption")
+                        or item.get("message")
+                        or item.get("content")
+                        or ""
+                    )
+                else:
+                    continue
+                text = clean_text(text)
+                if text:
+                    texts.append(text)
+        return texts
+
+    def _rebuild_indexes_from_stored_texts(self, payload: dict[str, Any]) -> int:
+        texts = self._stored_texts(payload)
+        if not texts:
+            return 0
+
+        counts: dict[str, int] = {}
+        transitions: dict[str, dict[str, int]] = {}
+        words_seen = 0
+        messages_seen = 0
+
+        for text in texts:
+            tokens = tokenize(text)
+            if not tokens:
+                continue
+            messages_seen += 1
+            words_seen += len(tokens)
+            for token in tokens:
+                counts[token] = int(counts.get(token, 0)) + 1
+            for prev, current in zip(tokens, tokens[1:], strict=False):
+                bucket = transitions.setdefault(prev, {})
+                bucket[current] = int(bucket.get(current, 0)) + 1
+
+        if not counts:
+            return 0
+
+        payload["word_counts"] = counts
+        payload["transitions"] = transitions
+        stats = payload.setdefault("stats", {})
+        stats["messages_seen"] = max(int(stats.get("messages_seen", 0) or 0), messages_seen)
+        stats["words_seen"] = max(int(stats.get("words_seen", 0) or 0), words_seen)
+
+        # Приводим старые форматы к recent_messages, но не дублируем, если он уже есть.
+        if not payload.get("recent_messages"):
+            payload["recent_messages"] = [
+                {"text": text[:1000], "source_label": "imported", "message_id": None, "ts": int(time.time())}
+                for text in texts[-self.max_recent_messages :]
+            ]
+        return len(counts)
 
     @staticmethod
     def _empty() -> dict[str, Any]:
