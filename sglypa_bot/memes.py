@@ -28,6 +28,10 @@ TEMPLATE_PATTERNS = [
 ]
 
 FONT_CANDIDATES = [
+    "fonts/NotoSans-Bold.ttf",
+    "fonts/NotoSans-Regular.ttf",
+    "fonts/DejaVuSans-Bold.ttf",
+    "fonts/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
@@ -109,12 +113,18 @@ class MemeGenerator:
     def _font_path(self) -> str | None:
         if self.font_path:
             candidate = Path(self.font_path)
+            if not candidate.is_absolute():
+                candidate = self.project_root / candidate
             if candidate.exists():
                 return str(candidate)
-            log.warning("FONT_PATH задан, но файл не найден: %s", self.font_path)
-        for candidate in FONT_CANDIDATES:
-            if Path(candidate).exists():
-                return candidate
+            log.warning("FONT_PATH задан, но файл не найден: %s", candidate)
+
+        for candidate_raw in FONT_CANDIDATES:
+            candidate = Path(candidate_raw)
+            if not candidate.is_absolute():
+                candidate = self.project_root / candidate
+            if candidate.exists():
+                return str(candidate)
         return None
 
     def _load_font(self, size: int) -> ImageFont.ImageFont:
