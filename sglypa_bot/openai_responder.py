@@ -14,23 +14,33 @@ TAGIR_CLEAN_RE = re.compile(r"\s+")
 
 
 class OpenAIResponder:
-    """Small async client for OpenAI Responses API.
-
-    The project already uses aiohttp for Telegram, so this avoids an additional SDK
-    dependency and works well on minimal hosting providers.
-    """
+    """Small async client for OpenAI Responses API with human-readable diagnostics."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
         self.session: aiohttp.ClientSession | None = None
+        self.last_error: str | None = None
+        self.last_errors: list[str] = []
+        self.last_response_id: str | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.config.openai_api_key and self.config.tagir_enabled)
 
+    def disabled_reason(self) -> str | None:
+        if not self.config.tagir_enabled:
+            return "TAGIR_ENABLED=false"
+        if not self.config.openai_api_key:
+            return "OPENAI_API_KEY пустой или не задан"
+        return None
+
     async def open(self) -> None:
         if self.session is None or self.session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.config.openai_timeout_seconds, connect=15, sock_read=self.config.openai_timeout_seconds)
+            timeout = aiohttp.ClientTimeout(
+                total=self.config.openai_timeout_seconds,
+                connect=15,
+                sock_read=self.config.openai_timeout_seconds,
+            )
             self.session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
@@ -44,7 +54,12 @@ class OpenAIResponder:
         replied_text: str | None = None,
         recent_channel_texts: list[str] | None = None,
     ) -> str | None:
+        self.last_error = None
+        self.last_errors = []
+        self.last_response_id = None
+
         if not self.enabled:
+            self._remember_error(self.disabled_reason() or "Тагир выключен")
             return None
 
         clean_question = self._clean_user_text(user_text)
@@ -60,27 +75,48 @@ class OpenAIResponder:
             f"{recent_context}"
         )
 
-        payload: dict[str, Any] = {
+        base_payload: dict[str, Any] = {
             "model": self.config.openai_model,
             "instructions": self._instructions(),
             "input": input_text,
             "max_output_tokens": self.config.openai_max_output_tokens,
         }
+
+        payloads: list[dict[str, Any]] = []
         if self.config.openai_web_search:
-            payload["tools"] = [{"type": "web_search"}]
+            for tool_name in self._tool_order():
+                payload = dict(base_payload)
+                payload["tools"] = [{"type": tool_name}]
+                payloads.append(payload)
+        payloads.append(dict(base_payload))
 
-        response_payload = await self._post_response(payload)
-        if response_payload is None and payload.get("tools"):
-            # Some accounts/models may not have hosted web search. Keep the chat alive.
-            payload.pop("tools", None)
+        for payload in payloads:
             response_payload = await self._post_response(payload)
+            if response_payload is None:
+                continue
+            text = self._extract_output_text(response_payload)
+            text = self._postprocess(text)
+            if text:
+                return text
+            self._remember_error("OpenAI вернул ответ без текста")
 
-        if response_payload is None:
-            return None
+        return None
 
-        text = self._extract_output_text(response_payload)
-        text = self._postprocess(text)
-        return text or None
+    async def diagnostic(self, question: str = "привет") -> tuple[bool, str]:
+        if not self.enabled:
+            return False, self.disabled_reason() or "Тагир выключен"
+        answer = await self.answer(f"{self.config.tagir_name} {question}")
+        if answer:
+            return True, answer
+        return False, self.last_error or "OpenAI не вернул текст"
+
+    def _tool_order(self) -> list[str]:
+        configured = (self.config.openai_web_search_tool or "web_search_preview").strip()
+        order: list[str] = []
+        for item in (configured, "web_search_preview", "web_search"):
+            if item and item not in order:
+                order.append(item)
+        return order
 
     async def _post_response(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         await self.open()
@@ -90,20 +126,48 @@ class OpenAIResponder:
             "Authorization": f"Bearer {self.config.openai_api_key}",
             "Content-Type": "application/json",
         }
+        tool_label = ""
+        tools = payload.get("tools")
+        if isinstance(tools, list) and tools:
+            tool_label = f" tool={tools[0].get('type')}"
+
         try:
             async with self.session.post("https://api.openai.com/v1/responses", headers=headers, json=payload) as response:
-                data = await response.json(content_type=None)
-                if response.status >= 400:
-                    message = data.get("error", {}).get("message") or str(data)[:500]
-                    log.warning("OpenAI API error %s: %s", response.status, message)
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:  # noqa: BLE001
+                    raw_text = await response.text()
+                    self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {raw_text[:700]}")
                     return None
+
+                if response.status >= 400:
+                    message = data.get("error", {}).get("message") or str(data)[:700]
+                    self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {message}")
+                    log.warning("%s", self.last_error)
+                    return None
+
+                if isinstance(data.get("id"), str):
+                    self.last_response_id = data["id"]
                 return dict(data)
-        except aiohttp.ClientError as exc:
-            log.warning("OpenAI request failed: %s", exc)
+        except TimeoutError as exc:
+            self._remember_error(f"OpenAI timeout{tool_label}: {exc}")
+            log.warning("%s", self.last_error)
             return None
-        except Exception:  # noqa: BLE001
+        except aiohttp.ClientError as exc:
+            self._remember_error(f"OpenAI network error{tool_label}: {exc}")
+            log.warning("%s", self.last_error)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            self._remember_error(f"Unexpected OpenAI error{tool_label}: {type(exc).__name__}: {exc}")
             log.exception("Unexpected OpenAI error")
             return None
+
+    def _remember_error(self, message: str) -> None:
+        message = re.sub(r"sk-[A-Za-z0-9_\-]+", "sk-***", str(message))
+        self.last_error = message[:1200]
+        self.last_errors.append(self.last_error)
+        if len(self.last_errors) > 5:
+            self.last_errors = self.last_errors[-5:]
 
     def _instructions(self) -> str:
         name = self.config.tagir_name.strip() or "Тагир"
@@ -122,7 +186,6 @@ class OpenAIResponder:
         text = text.strip()
         if not text:
             return ""
-        # Remove the bot name from the beginning: "тагир, ...", "Tagir: ...".
         names = {self.config.tagir_name.lower(), "тагир", "tagir"}
         escaped = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True) if name)
         if escaped:
