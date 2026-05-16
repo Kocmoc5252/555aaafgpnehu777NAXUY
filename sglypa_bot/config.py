@@ -64,6 +64,8 @@ class Config:
     poll_media_chance: float = 0.35
     max_recent_messages: int = 1000
     openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_mode: str = "auto"
     openai_model: str = "gpt-5.2"
     openai_web_search: bool = True
     openai_web_search_tool: str = "web_search_preview"
@@ -117,6 +119,8 @@ def load_config() -> Config:
         poll_media_chance=_env_float("POLL_MEDIA_CHANCE", 0.35),
         max_recent_messages=max(50, _env_int("MAX_RECENT_MESSAGES", 1000)),
         openai_api_key=_env_str("OPENAI_API_KEY", ""),
+        openai_base_url=_env_str("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+        openai_api_mode=(_env_str("OPENAI_API_MODE", "auto") or "auto").lower(),
         openai_model=_env_str("OPENAI_MODEL", "gpt-5.2"),
         openai_web_search=_env_bool("OPENAI_WEB_SEARCH", True),
         openai_web_search_tool=_env_str("OPENAI_WEB_SEARCH_TOOL", "web_search_preview") or "web_search_preview",
