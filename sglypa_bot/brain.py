@@ -334,6 +334,18 @@ class Brain:
     def mark_reaction_set(self) -> None:
         self.stats["reactions_set"] = int(self.stats.get("reactions_set", 0)) + 1
 
+    def recent_texts(self, *, limit: int = 8) -> list[str]:
+        recent = self.data.setdefault("recent_messages", [])
+        texts: list[str] = []
+        for item in recent[-limit:]:
+            if isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                texts.append(text)
+        return texts
+
     def summary(self) -> str:
         counts = self.word_counts
         aliases: dict[str, int] = self.data.setdefault("admin_aliases", {})
