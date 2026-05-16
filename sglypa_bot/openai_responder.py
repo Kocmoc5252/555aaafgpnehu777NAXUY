@@ -75,30 +75,61 @@ class OpenAIResponder:
             f"{recent_context}"
         )
 
-        base_payload: dict[str, Any] = {
-            "model": self.config.openai_model,
-            "instructions": self._instructions(),
-            "input": input_text,
-            "max_output_tokens": self.config.openai_max_output_tokens,
-        }
+        mode = (self.config.openai_api_mode or "auto").lower().strip()
+        if mode not in {"auto", "responses", "chat", "chat_completions"}:
+            self._remember_error(f"OPENAI_API_MODE={mode!r} не поддерживается, использую auto")
+            mode = "auto"
+        if mode == "chat_completions":
+            mode = "chat"
 
-        payloads: list[dict[str, Any]] = []
-        if self.config.openai_web_search:
-            for tool_name in self._tool_order():
-                payload = dict(base_payload)
-                payload["tools"] = [{"type": tool_name}]
-                payloads.append(payload)
-        payloads.append(dict(base_payload))
+        if mode in {"auto", "responses"}:
+            base_payload: dict[str, Any] = {
+                "model": self.config.openai_model,
+                "instructions": self._instructions(),
+                "input": input_text,
+                "max_output_tokens": self.config.openai_max_output_tokens,
+            }
 
-        for payload in payloads:
-            response_payload = await self._post_response(payload)
+            payloads: list[dict[str, Any]] = []
+            if self.config.openai_web_search:
+                for tool_name in self._tool_order():
+                    payload = dict(base_payload)
+                    payload["tools"] = [{"type": tool_name}]
+                    payloads.append(payload)
+            payloads.append(dict(base_payload))
+
+            for payload in payloads:
+                response_payload = await self._post_response(payload)
+                if response_payload is None:
+                    continue
+                text = self._extract_output_text(response_payload)
+                text = self._postprocess(text)
+                if text:
+                    return text
+                self._remember_error("OpenAI Responses API вернул ответ без текста")
+
+            if mode == "responses":
+                return None
+
+        if mode in {"auto", "chat"}:
+            response_payload = await self._post_chat_completion(
+                system_text=self._instructions(),
+                user_text=input_text,
+                use_max_completion_tokens=True,
+            )
             if response_payload is None:
-                continue
-            text = self._extract_output_text(response_payload)
-            text = self._postprocess(text)
-            if text:
-                return text
-            self._remember_error("OpenAI вернул ответ без текста")
+                # Some OpenAI-compatible proxies still use the older max_tokens name.
+                response_payload = await self._post_chat_completion(
+                    system_text=self._instructions(),
+                    user_text=input_text,
+                    use_max_completion_tokens=False,
+                )
+            if response_payload is not None:
+                text = self._extract_chat_text(response_payload)
+                text = self._postprocess(text)
+                if text:
+                    return text
+                self._remember_error("OpenAI Chat Completions API вернул ответ без текста")
 
         return None
 
@@ -132,7 +163,7 @@ class OpenAIResponder:
             tool_label = f" tool={tools[0].get('type')}"
 
         try:
-            async with self.session.post("https://api.openai.com/v1/responses", headers=headers, json=payload) as response:
+            async with self.session.post(f"{self.config.openai_base_url}/responses", headers=headers, json=payload) as response:
                 try:
                     data = await response.json(content_type=None)
                 except Exception:  # noqa: BLE001
@@ -160,6 +191,62 @@ class OpenAIResponder:
         except Exception as exc:  # noqa: BLE001
             self._remember_error(f"Unexpected OpenAI error{tool_label}: {type(exc).__name__}: {exc}")
             log.exception("Unexpected OpenAI error")
+            return None
+
+    async def _post_chat_completion(
+        self,
+        *,
+        system_text: str,
+        user_text: str,
+        use_max_completion_tokens: bool,
+    ) -> dict[str, Any] | None:
+        await self.open()
+        assert self.session is not None
+
+        headers = {
+            "Authorization": f"Bearer {self.config.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        token_field = "max_completion_tokens" if use_max_completion_tokens else "max_tokens"
+        payload: dict[str, Any] = {
+            "model": self.config.openai_model,
+            "messages": [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+            token_field: self.config.openai_max_output_tokens,
+        }
+        label = f" chat_completions {token_field}"
+
+        try:
+            async with self.session.post(f"{self.config.openai_base_url}/chat/completions", headers=headers, json=payload) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:  # noqa: BLE001
+                    raw_text = await response.text()
+                    self._remember_error(f"OpenAI HTTP {response.status}{label}: {raw_text[:700]}")
+                    return None
+
+                if response.status >= 400:
+                    message = data.get("error", {}).get("message") or str(data)[:700]
+                    self._remember_error(f"OpenAI HTTP {response.status}{label}: {message}")
+                    log.warning("%s", self.last_error)
+                    return None
+
+                if isinstance(data.get("id"), str):
+                    self.last_response_id = data["id"]
+                return dict(data)
+        except TimeoutError as exc:
+            self._remember_error(f"OpenAI timeout{label}: {exc}")
+            log.warning("%s", self.last_error)
+            return None
+        except aiohttp.ClientError as exc:
+            self._remember_error(f"OpenAI network error{label}: {exc}")
+            log.warning("%s", self.last_error)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            self._remember_error(f"Unexpected OpenAI error{label}: {type(exc).__name__}: {exc}")
+            log.exception("Unexpected OpenAI chat completion error")
             return None
 
     def _remember_error(self, message: str) -> None:
@@ -219,6 +306,25 @@ class OpenAIResponder:
                 if isinstance(content.get("text"), str):
                     parts.append(content["text"])
         return "\n".join(parts).strip()
+
+    def _extract_chat_text(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            return ""
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+                    elif isinstance(item.get("content"), str):
+                        parts.append(item["content"])
+            return "\n".join(parts).strip()
+        return ""
 
     def _postprocess(self, text: str) -> str:
         text = (text or "").strip()
