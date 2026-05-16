@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -156,7 +157,11 @@ class OpenAIResponder:
         headers = {
             "Authorization": f"Bearer {self.config.openai_api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
+        payload = dict(payload)
+        payload["stream"] = False
+
         tool_label = ""
         tools = payload.get("tools")
         if isinstance(tools, list) and tools:
@@ -164,10 +169,9 @@ class OpenAIResponder:
 
         try:
             async with self.session.post(f"{self.config.openai_base_url}/responses", headers=headers, json=payload) as response:
-                try:
-                    data = await response.json(content_type=None)
-                except Exception:  # noqa: BLE001
-                    raw_text = await response.text()
+                raw_text = await response.text()
+                data = self._loads_json_or_sse(raw_text)
+                if data is None:
                     self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {raw_text[:700]}")
                     return None
 
@@ -206,6 +210,7 @@ class OpenAIResponder:
         headers = {
             "Authorization": f"Bearer {self.config.openai_api_key}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
         token_field = "max_completion_tokens" if use_max_completion_tokens else "max_tokens"
         payload: dict[str, Any] = {
@@ -215,15 +220,15 @@ class OpenAIResponder:
                 {"role": "user", "content": user_text},
             ],
             token_field: self.config.openai_max_output_tokens,
+            "stream": False,
         }
         label = f" chat_completions {token_field}"
 
         try:
             async with self.session.post(f"{self.config.openai_base_url}/chat/completions", headers=headers, json=payload) as response:
-                try:
-                    data = await response.json(content_type=None)
-                except Exception:  # noqa: BLE001
-                    raw_text = await response.text()
+                raw_text = await response.text()
+                data = self._loads_json_or_sse(raw_text)
+                if data is None:
                     self._remember_error(f"OpenAI HTTP {response.status}{label}: {raw_text[:700]}")
                     return None
 
@@ -248,6 +253,81 @@ class OpenAIResponder:
             self._remember_error(f"Unexpected OpenAI error{label}: {type(exc).__name__}: {exc}")
             log.exception("Unexpected OpenAI chat completion error")
             return None
+
+    def _loads_json_or_sse(self, raw_text: str) -> dict[str, Any] | None:
+        """Decode normal JSON or SSE-style streaming chunks returned by some proxies."""
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            return None
+
+        try:
+            data = json.loads(raw_text)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        chunks: list[dict[str, Any]] = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            piece = line[5:].strip()
+            if not piece or piece == "[DONE]":
+                continue
+            try:
+                event = json.loads(piece)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                chunks.append(event)
+
+        if not chunks:
+            return None
+
+        text_parts: list[str] = []
+        first_id: str | None = None
+        model: str | None = None
+        last_event = chunks[-1]
+
+        for event in chunks:
+            if first_id is None and isinstance(event.get("id"), str):
+                first_id = event["id"]
+            if model is None and isinstance(event.get("model"), str):
+                model = event["model"]
+
+            # Chat Completions streaming format.
+            choices = event.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    delta = choice.get("delta") or {}
+                    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                        text_parts.append(delta["content"])
+                    message = choice.get("message") or {}
+                    if isinstance(message, dict) and isinstance(message.get("content"), str):
+                        text_parts.append(message["content"])
+
+            # Responses API streaming format, just in case a proxy returns it.
+            event_type = event.get("type")
+            if isinstance(event_type, str) and event_type.endswith(".delta") and isinstance(event.get("delta"), str):
+                text_parts.append(event["delta"])
+            if isinstance(event.get("output_text"), str):
+                text_parts.append(event["output_text"])
+            if isinstance(event.get("text"), str):
+                text_parts.append(event["text"])
+
+        text = "".join(text_parts).strip()
+        if text:
+            return {
+                "id": first_id or last_event.get("id") or "streaming-response",
+                "object": "chat.completion",
+                "model": model or last_event.get("model"),
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": text}}],
+                "output_text": text,
+            }
+
+        return last_event if isinstance(last_event, dict) else None
 
     def _remember_error(self, message: str) -> None:
         message = re.sub(r"sk-[A-Za-z0-9_\-]+", "sk-***", str(message))
