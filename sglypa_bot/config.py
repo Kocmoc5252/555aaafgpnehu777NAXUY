@@ -76,6 +76,14 @@ class Config:
     tagir_name: str = "тагир"
     tagir_debug_to_owner: bool = True
     tagir_error_to_channel: bool = False
+    tagir_image_enabled: bool = True
+    tagir_image_model: str = "gpt-5.5"
+    tagir_image_api_key: str = ""
+    tagir_image_base_url: str = ""
+    tagir_image_size: str = "1024x1024"
+    tagir_image_quality: str = "auto"
+    tagir_image_prompt_model: str = "gpt-5.5"
+    tagir_image_enhance_prompt: bool = True
 
 
 def load_config() -> Config:
@@ -100,6 +108,12 @@ def load_config() -> Config:
             path = PROJECT_ROOT / path
         font_path = str(path)
 
+    openai_api_key = _env_str("OPENAI_API_KEY", "")
+    openai_base_url = _env_str("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+    tagir_image_api_key = _env_str("TAGIR_IMAGE_API_KEY", "") or openai_api_key
+    tagir_image_base_url = _env_str("TAGIR_IMAGE_BASE_URL", "").rstrip("/") or openai_base_url
+
     return Config(
         bot_token=token,
         channel_id=_env_int("CHANNEL_ID", -1003009758716),
@@ -118,8 +132,8 @@ def load_config() -> Config:
         idle_action_chance=_env_float("IDLE_ACTION_CHANCE", 0.28),
         poll_media_chance=_env_float("POLL_MEDIA_CHANCE", 0.35),
         max_recent_messages=max(50, _env_int("MAX_RECENT_MESSAGES", 1000)),
-        openai_api_key=_env_str("OPENAI_API_KEY", ""),
-        openai_base_url=_env_str("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
         openai_api_mode=(_env_str("OPENAI_API_MODE", "auto") or "auto").lower(),
         openai_model=_env_str("OPENAI_MODEL", "gpt-5.2"),
         openai_web_search=_env_bool("OPENAI_WEB_SEARCH", True),
@@ -131,4 +145,12 @@ def load_config() -> Config:
         tagir_name=_env_str("TAGIR_NAME", "тагир") or "тагир",
         tagir_debug_to_owner=_env_bool("TAGIR_DEBUG_TO_OWNER", True),
         tagir_error_to_channel=_env_bool("TAGIR_ERROR_TO_CHANNEL", False),
+        tagir_image_enabled=_env_bool("TAGIR_IMAGE_ENABLED", True),
+        tagir_image_model=_env_str("TAGIR_IMAGE_MODEL", "gpt-5.5") or "gpt-5.5",
+        tagir_image_api_key=tagir_image_api_key,
+        tagir_image_base_url=tagir_image_base_url,
+        tagir_image_size=_env_str("TAGIR_IMAGE_SIZE", "1024x1024") or "1024x1024",
+        tagir_image_quality=_env_str("TAGIR_IMAGE_QUALITY", "auto") or "auto",
+        tagir_image_prompt_model=_env_str("TAGIR_IMAGE_PROMPT_MODEL", _env_str("TAGIR_IMAGE_MODEL", "gpt-5.5")) or "gpt-5.5",
+        tagir_image_enhance_prompt=_env_bool("TAGIR_IMAGE_ENHANCE_PROMPT", True),
     )
