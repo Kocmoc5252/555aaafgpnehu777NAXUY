@@ -92,9 +92,12 @@ def owner_keyboard(enabled: bool) -> dict[str, Any]:
             ],
             [
                 {"text": "📚 статистика", "callback_data": "stats"},
-                {"text": "🔇 выключить хаос" if enabled else "🔊 включить хаос", "callback_data": "toggle"},
+                {"text": "🩺 проверка Тагира", "callback_data": "tagir_diag"},
             ],
-            [{"text": "❌ сбросить режим ввода", "callback_data": "cancel_mode"}],
+            [
+                {"text": "🔇 выключить хаос" if enabled else "🔊 включить хаос", "callback_data": "toggle"},
+                {"text": "❌ сбросить режим ввода", "callback_data": "cancel_mode"},
+            ],
         ]
     }
 
@@ -232,6 +235,15 @@ class SglypaChannelBot:
             await self.api.send_message(chat_id, summary, reply_markup=owner_keyboard(self.state.enabled))
             return
 
+        if text in {"/tagir", "/tagir_status", "/diag"}:
+            await self.send_tagir_status(chat_id)
+            return
+
+        if text.startswith("/tagirtest"):
+            question = text.removeprefix("/tagirtest").strip() or "привет"
+            await self.run_tagir_diagnostic(chat_id, question)
+            return
+
         mode = self.state.get_owner_mode(self.config.owner_id)
         if text in {"/cancel", "отмена"}:
             self.state.set_owner_mode(self.config.owner_id, None)
@@ -302,6 +314,8 @@ class SglypaChannelBot:
             self.state.set_owner_mode(self.config.owner_id, "await_learn")
             self.state.save()
             await self.api.send_message(chat_id, "Пришли фразу, которую надо скормить в память без публикации.")
+        elif action == "tagir_diag":
+            await self.run_tagir_diagnostic(chat_id, "привет, скажи что ты жив")
         elif action == "stats":
             async with self.brain_lock:
                 summary = self.brain.summary()
@@ -481,11 +495,18 @@ class SglypaChannelBot:
         return question
 
     async def answer_as_tagir(self, message: dict[str, Any], text: str) -> None:
+        message_id = int(message.get("message_id"))
+        log.info("Тагир-триггер пойман: message_id=%s text=%r", message_id, text[:120])
+
         if not self.openai.enabled:
-            log.info("Тагир-триггер сработал, но OPENAI_API_KEY/TAGIR_ENABLED не настроены")
+            reason = self.openai.disabled_reason() or "неизвестно"
+            msg = f"Тагир поймал обращение, но не отвечает: {reason}"
+            log.warning("%s", msg)
+            await self.notify_owner(msg)
+            if self.config.tagir_error_to_channel:
+                await self.safe_channel_error_reply(message_id, "Тагир не настроен: проверь OPENAI_API_KEY/TAGIR_ENABLED.")
             return
 
-        message_id = int(message.get("message_id"))
         reply = message.get("reply_to_message") or {}
         replied_text = message_text(reply) or None
         async with self.brain_lock:
@@ -493,7 +514,16 @@ class SglypaChannelBot:
 
         answer = await self.openai.answer(text, replied_text=replied_text, recent_channel_texts=recent)
         if not answer:
-            log.warning("Тагир не смог получить ответ от OpenAI")
+            reason = self.openai.last_error or "OpenAI не вернул текст"
+            log.warning("Тагир не смог получить ответ: %s", reason)
+            await self.notify_owner(
+                "⚠️ Ошибка Тагира\n"
+                f"Модель: {self.config.openai_model}\n"
+                f"Сообщение: {text[:250]}\n"
+                f"Причина: {reason}"
+            )
+            if self.config.tagir_error_to_channel:
+                await self.safe_channel_error_reply(message_id, "Тагир сейчас сломался, ошибка ушла владельцу.")
             return
 
         sent = await self.api.send_message(
@@ -505,6 +535,54 @@ class SglypaChannelBot:
         if sent_id := sent.get("message_id"):
             self.state.set_last_channel_message_id(int(sent_id))
             self.state.save()
+
+    async def notify_owner(self, text: str) -> None:
+        if not self.config.tagir_debug_to_owner:
+            return
+        try:
+            await self.api.send_message(self.config.owner_id, text[:4096])
+        except TelegramAPIError as exc:
+            log.warning("Не удалось отправить диагностику владельцу: %s", exc.description)
+
+    async def safe_channel_error_reply(self, reply_to_message_id: int, text: str) -> None:
+        try:
+            await self.api.send_message(self.config.channel_id, text, reply_to_message_id=reply_to_message_id, disable_notification=True)
+        except TelegramAPIError as exc:
+            log.warning("Не удалось отправить ошибку Тагира в канал: %s", exc.description)
+
+    async def send_tagir_status(self, chat_id: int) -> None:
+        status = "включен" if self.openai.enabled else f"выключен: {self.openai.disabled_reason() or 'нет причины'}"
+        last_error = self.openai.last_error or "нет"
+        text = (
+            "🩺 Статус Тагира\n"
+            f"TAGIR_ENABLED: {self.config.tagir_enabled}\n"
+            f"OPENAI_API_KEY: {'есть' if self.config.openai_api_key else 'нет'}\n"
+            f"OPENAI_MODEL: {self.config.openai_model}\n"
+            f"OPENAI_WEB_SEARCH: {self.config.openai_web_search}\n"
+            f"OPENAI_WEB_SEARCH_TOOL: {self.config.openai_web_search_tool}\n"
+            f"Статус: {status}\n"
+            f"Последняя ошибка: {last_error}\n\n"
+            "Для проверки напиши: /tagirtest привет"
+        )
+        await self.api.send_message(chat_id, text[:4096], reply_markup=owner_keyboard(self.state.enabled))
+
+    async def run_tagir_diagnostic(self, chat_id: int, question: str) -> None:
+        await self.api.send_message(chat_id, "Проверяю Тагира через OpenAI...")
+        ok, result = await self.openai.diagnostic(question)
+        if ok:
+            await self.api.send_message(chat_id, f"✅ Тагир отвечает:\n{result}", reply_markup=owner_keyboard(self.state.enabled))
+        else:
+            errors = "\n".join(f"- {item}" for item in self.openai.last_errors[-5:]) or result
+            await self.api.send_message(
+                chat_id,
+                (
+                    "❌ Тагир не отвечает\n"
+                    f"Модель: {self.config.openai_model}\n"
+                    f"Причина: {result}\n"
+                    f"Ошибки:\n{errors}"
+                )[:4096],
+                reply_markup=owner_keyboard(self.state.enabled),
+            )
 
     async def set_random_reaction(self, message_id: int) -> bool:
         emoji = random.choice(REACTIONS)
