@@ -64,13 +64,16 @@ class Config:
     poll_media_chance: float = 0.35
     max_recent_messages: int = 1000
     openai_api_key: str = ""
-    openai_model: str = "gpt-5-mini"
+    openai_model: str = "gpt-5.2"
     openai_web_search: bool = True
+    openai_web_search_tool: str = "web_search_preview"
     openai_timeout_seconds: int = 45
     openai_max_output_tokens: int = 260
     openai_max_output_chars: int = 900
     tagir_enabled: bool = True
     tagir_name: str = "тагир"
+    tagir_debug_to_owner: bool = True
+    tagir_error_to_channel: bool = False
 
 
 def load_config() -> Config:
@@ -114,11 +117,14 @@ def load_config() -> Config:
         poll_media_chance=_env_float("POLL_MEDIA_CHANCE", 0.35),
         max_recent_messages=max(50, _env_int("MAX_RECENT_MESSAGES", 1000)),
         openai_api_key=_env_str("OPENAI_API_KEY", ""),
-        openai_model=_env_str("OPENAI_MODEL", "gpt-5-mini"),
+        openai_model=_env_str("OPENAI_MODEL", "gpt-5.2"),
         openai_web_search=_env_bool("OPENAI_WEB_SEARCH", True),
+        openai_web_search_tool=_env_str("OPENAI_WEB_SEARCH_TOOL", "web_search_preview") or "web_search_preview",
         openai_timeout_seconds=max(10, _env_int("OPENAI_TIMEOUT_SECONDS", 45)),
         openai_max_output_tokens=max(32, _env_int("OPENAI_MAX_OUTPUT_TOKENS", 260)),
         openai_max_output_chars=max(120, _env_int("OPENAI_MAX_OUTPUT_CHARS", 900)),
         tagir_enabled=_env_bool("TAGIR_ENABLED", True),
         tagir_name=_env_str("TAGIR_NAME", "тагир") or "тагир",
+        tagir_debug_to_owner=_env_bool("TAGIR_DEBUG_TO_OWNER", True),
+        tagir_error_to_channel=_env_bool("TAGIR_ERROR_TO_CHANNEL", False),
     )
