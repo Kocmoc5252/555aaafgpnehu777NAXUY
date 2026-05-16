@@ -12,6 +12,7 @@ from typing import Any
 from sglypa_bot.brain import Brain, tokenize
 from sglypa_bot.config import PROJECT_ROOT, Config, load_config
 from sglypa_bot.memes import MemeGenerator
+from sglypa_bot.openai_responder import OpenAIResponder
 from sglypa_bot.state import BotState
 from sglypa_bot.telegram_api import TelegramAPIError, TelegramBotAPI
 
@@ -64,6 +65,15 @@ def has_meme_trigger(text: str) -> bool:
     return "сделай мем" in lower or "сделай мемчик" in lower or "делай мем" in lower or bool(TRIGGER_RE.search(lower))
 
 
+def starts_with_tagir(text: str, name: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    names = {name.lower().strip() or "тагир", "тагир", "tagir"}
+    escaped = "|".join(re.escape(item) for item in sorted(names, key=len, reverse=True) if item)
+    return bool(re.match(rf"^\s*(?:{escaped})(?=$|[\s,.:;!?\-—])", text, flags=re.IGNORECASE))
+
+
 def owner_keyboard(enabled: bool) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -101,6 +111,7 @@ class SglypaChannelBot:
             output_dir=config.generated_dir,
             font_path=config.font_path,
         )
+        self.openai = OpenAIResponder(config)
         self.brain_lock = asyncio.Lock()
         self.offset: int | None = None
         self.last_admin_refresh = 0.0
@@ -123,6 +134,7 @@ class SglypaChannelBot:
                 background_task.cancel()
                 with contextlib_suppress(asyncio.CancelledError):
                     await background_task
+                await self.openai.close()
 
     async def polling_loop(self) -> None:
         allowed_updates = ["message", "channel_post", "edited_channel_post", "callback_query"]
@@ -179,6 +191,10 @@ class SglypaChannelBot:
                 log.info("Выучено слов: %s из message_id=%s", learned, message_id)
 
         if edited or not self.state.enabled:
+            return
+
+        if text and starts_with_tagir(text, self.config.tagir_name):
+            await self.answer_as_tagir(message, text)
             return
 
         # Реакции не блокируют остальную логику: если канал их запретил, бот просто продолжит жить.
@@ -308,11 +324,13 @@ class SglypaChannelBot:
     async def send_owner_panel(self, chat_id: int, *, prefix: str | None = None) -> None:
         templates = len(self.memes.find_templates())
         text = prefix + "\n\n" if prefix else ""
+        tagir_status = "включен" if self.openai.enabled else "выключен"
         text += (
             "🐸 Панель канального бредогенератора\n"
             f"Канал: {self.config.channel_id}\n"
             f"Мем-шаблонов найдено: {templates}\n"
-            f"Статус хаоса: {'включен' if self.state.enabled else 'выключен'}"
+            f"Статус хаоса: {'включен' if self.state.enabled else 'выключен'}\n"
+            f"Тагир: {tagir_status}"
         )
         await self.api.send_message(chat_id, text, reply_markup=owner_keyboard(self.state.enabled))
 
@@ -461,6 +479,32 @@ class SglypaChannelBot:
             self.state.set_last_channel_message_id(int(message_id))
             self.state.save()
         return question
+
+    async def answer_as_tagir(self, message: dict[str, Any], text: str) -> None:
+        if not self.openai.enabled:
+            log.info("Тагир-триггер сработал, но OPENAI_API_KEY/TAGIR_ENABLED не настроены")
+            return
+
+        message_id = int(message.get("message_id"))
+        reply = message.get("reply_to_message") or {}
+        replied_text = message_text(reply) or None
+        async with self.brain_lock:
+            recent = self.brain.recent_texts(limit=8)
+
+        answer = await self.openai.answer(text, replied_text=replied_text, recent_channel_texts=recent)
+        if not answer:
+            log.warning("Тагир не смог получить ответ от OpenAI")
+            return
+
+        sent = await self.api.send_message(
+            self.config.channel_id,
+            answer,
+            reply_to_message_id=message_id,
+            disable_notification=True,
+        )
+        if sent_id := sent.get("message_id"):
+            self.state.set_last_channel_message_id(int(sent_id))
+            self.state.save()
 
     async def set_random_reaction(self, message_id: int) -> bool:
         emoji = random.choice(REACTIONS)
