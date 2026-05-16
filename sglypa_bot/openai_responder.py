@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
+import uuid
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -15,7 +18,7 @@ TAGIR_CLEAN_RE = re.compile(r"\s+")
 
 
 class OpenAIResponder:
-    """Small async client for OpenAI Responses API with human-readable diagnostics."""
+    """Small async client for OpenAI-compatible chat + image APIs."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -28,6 +31,10 @@ class OpenAIResponder:
     def enabled(self) -> bool:
         return bool(self.config.openai_api_key and self.config.tagir_enabled)
 
+    @property
+    def image_enabled(self) -> bool:
+        return bool(self.config.tagir_enabled and self.config.tagir_image_enabled and self.config.tagir_image_api_key)
+
     def disabled_reason(self) -> str | None:
         if not self.config.tagir_enabled:
             return "TAGIR_ENABLED=false"
@@ -35,11 +42,20 @@ class OpenAIResponder:
             return "OPENAI_API_KEY пустой или не задан"
         return None
 
+    def image_disabled_reason(self) -> str | None:
+        if not self.config.tagir_enabled:
+            return "TAGIR_ENABLED=false"
+        if not self.config.tagir_image_enabled:
+            return "TAGIR_IMAGE_ENABLED=false"
+        if not self.config.tagir_image_api_key:
+            return "TAGIR_IMAGE_API_KEY пустой или не задан"
+        return None
+
     async def open(self) -> None:
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(
                 total=self.config.openai_timeout_seconds,
-                connect=15,
+                connect=20,
                 sock_read=self.config.openai_timeout_seconds,
             )
             self.session = aiohttp.ClientSession(timeout=timeout)
@@ -55,9 +71,7 @@ class OpenAIResponder:
         replied_text: str | None = None,
         recent_channel_texts: list[str] | None = None,
     ) -> str | None:
-        self.last_error = None
-        self.last_errors = []
-        self.last_response_id = None
+        self._reset_errors()
 
         if not self.enabled:
             self._remember_error(self.disabled_reason() or "Тагир выключен")
@@ -117,13 +131,14 @@ class OpenAIResponder:
                 system_text=self._instructions(),
                 user_text=input_text,
                 use_max_completion_tokens=True,
+                model=self.config.openai_model,
             )
             if response_payload is None:
-                # Some OpenAI-compatible proxies still use the older max_tokens name.
                 response_payload = await self._post_chat_completion(
                     system_text=self._instructions(),
                     user_text=input_text,
                     use_max_completion_tokens=False,
+                    model=self.config.openai_model,
                 )
             if response_payload is not None:
                 text = self._extract_chat_text(response_payload)
@@ -133,6 +148,53 @@ class OpenAIResponder:
                 self._remember_error("OpenAI Chat Completions API вернул ответ без текста")
 
         return None
+
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        output_dir: Path,
+        replied_text: str | None = None,
+        recent_channel_texts: list[str] | None = None,
+    ) -> tuple[Path | None, str | None]:
+        self._reset_errors()
+
+        if not self.image_enabled:
+            self._remember_error(self.image_disabled_reason() or "Режим картинок выключен")
+            return None, None
+
+        prompt = prompt.strip()
+        if not prompt:
+            self._remember_error("После 'тагир нарисуй' нужен текст запроса")
+            return None, None
+
+        final_prompt = prompt
+        if self.config.tagir_image_enhance_prompt:
+            upgraded = await self._enhance_image_prompt(prompt, replied_text=replied_text, recent_channel_texts=recent_channel_texts)
+            if upgraded:
+                final_prompt = upgraded
+
+        payload: dict[str, Any] = {
+            "model": self.config.tagir_image_model,
+            "prompt": final_prompt,
+            "size": self.config.tagir_image_size,
+        }
+        if self.config.tagir_image_quality:
+            payload["quality"] = self.config.tagir_image_quality
+
+        data = await self._post_image_generation(payload)
+        if data is None:
+            return None, final_prompt
+
+        image_bytes = await self._extract_image_bytes(data)
+        if image_bytes is None:
+            self._remember_error("Image API вернул ответ без картинки (нет b64_json/url)")
+            return None, final_prompt
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"tagir_{uuid.uuid4().hex[:12]}.png"
+        path.write_bytes(image_bytes)
+        return path, final_prompt
 
     async def diagnostic(self, question: str = "привет") -> tuple[bool, str]:
         if not self.enabled:
@@ -151,14 +213,7 @@ class OpenAIResponder:
         return order
 
     async def _post_response(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        await self.open()
-        assert self.session is not None
-
-        headers = {
-            "Authorization": f"Bearer {self.config.openai_api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = self._text_headers()
         payload = dict(payload)
         payload["stream"] = False
 
@@ -168,22 +223,19 @@ class OpenAIResponder:
             tool_label = f" tool={tools[0].get('type')}"
 
         try:
-            async with self.session.post(f"{self.config.openai_base_url}/responses", headers=headers, json=payload) as response:
-                raw_text = await response.text()
-                data = self._loads_json_or_sse(raw_text)
-                if data is None:
-                    self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {raw_text[:700]}")
-                    return None
-
-                if response.status >= 400:
-                    message = data.get("error", {}).get("message") or str(data)[:700]
-                    self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {message}")
-                    log.warning("%s", self.last_error)
-                    return None
-
-                if isinstance(data.get("id"), str):
-                    self.last_response_id = data["id"]
-                return dict(data)
+            raw_text, response = await self._post_json(f"{self.config.openai_base_url}/responses", headers=headers, payload=payload)
+            data = self._loads_json_or_sse(raw_text)
+            if data is None:
+                self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {raw_text[:700]}")
+                return None
+            if response.status >= 400:
+                message = data.get("error", {}).get("message") or str(data)[:700]
+                self._remember_error(f"OpenAI HTTP {response.status}{tool_label}: {message}")
+                log.warning("%s", self.last_error)
+                return None
+            if isinstance(data.get("id"), str):
+                self.last_response_id = data["id"]
+            return dict(data)
         except TimeoutError as exc:
             self._remember_error(f"OpenAI timeout{tool_label}: {exc}")
             log.warning("%s", self.last_error)
@@ -203,18 +255,12 @@ class OpenAIResponder:
         system_text: str,
         user_text: str,
         use_max_completion_tokens: bool,
+        model: str,
     ) -> dict[str, Any] | None:
-        await self.open()
-        assert self.session is not None
-
-        headers = {
-            "Authorization": f"Bearer {self.config.openai_api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = self._text_headers()
         token_field = "max_completion_tokens" if use_max_completion_tokens else "max_tokens"
         payload: dict[str, Any] = {
-            "model": self.config.openai_model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_text},
                 {"role": "user", "content": user_text},
@@ -225,22 +271,21 @@ class OpenAIResponder:
         label = f" chat_completions {token_field}"
 
         try:
-            async with self.session.post(f"{self.config.openai_base_url}/chat/completions", headers=headers, json=payload) as response:
-                raw_text = await response.text()
-                data = self._loads_json_or_sse(raw_text)
-                if data is None:
-                    self._remember_error(f"OpenAI HTTP {response.status}{label}: {raw_text[:700]}")
-                    return None
+            raw_text, response = await self._post_json(f"{self.config.openai_base_url}/chat/completions", headers=headers, payload=payload)
+            data = self._loads_json_or_sse(raw_text)
+            if data is None:
+                self._remember_error(f"OpenAI HTTP {response.status}{label}: {raw_text[:700]}")
+                return None
 
-                if response.status >= 400:
-                    message = data.get("error", {}).get("message") or str(data)[:700]
-                    self._remember_error(f"OpenAI HTTP {response.status}{label}: {message}")
-                    log.warning("%s", self.last_error)
-                    return None
+            if response.status >= 400:
+                message = data.get("error", {}).get("message") or str(data)[:700]
+                self._remember_error(f"OpenAI HTTP {response.status}{label}: {message}")
+                log.warning("%s", self.last_error)
+                return None
 
-                if isinstance(data.get("id"), str):
-                    self.last_response_id = data["id"]
-                return dict(data)
+            if isinstance(data.get("id"), str):
+                self.last_response_id = data["id"]
+            return dict(data)
         except TimeoutError as exc:
             self._remember_error(f"OpenAI timeout{label}: {exc}")
             log.warning("%s", self.last_error)
@@ -254,12 +299,127 @@ class OpenAIResponder:
             log.exception("Unexpected OpenAI chat completion error")
             return None
 
+    async def _enhance_image_prompt(
+        self,
+        raw_prompt: str,
+        *,
+        replied_text: str | None,
+        recent_channel_texts: list[str] | None,
+    ) -> str | None:
+        system_text = (
+            f"Ты помощник {self.config.tagir_name}. "
+            "Преобразуй пользовательскую идею в хороший промпт для генерации изображения. "
+            "Пиши на русском. Верни только сам промпт, без пояснений и кавычек. "
+            "Сделай промпт визуально конкретным: композиция, детали, свет, стиль и настроение. "
+            "Если пользователь хочет фото, делай упор на фотореализм."
+        )
+        recent_context = self._format_recent_context(recent_channel_texts or [])
+        reply_context = f"\nТекст сообщения, на которое ответили: {replied_text[:400]}" if replied_text else ""
+        user_text = f"Идея пользователя для картинки: {raw_prompt}{reply_context}{recent_context}"
+
+        response_payload = await self._post_chat_completion(
+            system_text=system_text,
+            user_text=user_text,
+            use_max_completion_tokens=False,
+            model=self.config.tagir_image_prompt_model or self.config.openai_model,
+        )
+        if response_payload is None:
+            return None
+        text = self._postprocess(self._extract_chat_text(response_payload))
+        if not text:
+            self._remember_error("Не удалось улучшить промпт для картинки, рисую по исходному тексту")
+            return None
+        return text
+
+    async def _post_image_generation(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        headers = {
+            "Authorization": f"Bearer {self.config.tagir_image_api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        label = " image_generation"
+        try:
+            raw_text, response = await self._post_json(f"{self.config.tagir_image_base_url}/images/generations", headers=headers, payload=payload)
+            data = self._loads_json_or_sse(raw_text)
+            if data is None:
+                self._remember_error(f"OpenAI HTTP {response.status}{label}: {raw_text[:700]}")
+                return None
+            if response.status >= 400:
+                message = data.get("error", {}).get("message") or str(data)[:700]
+                self._remember_error(f"OpenAI HTTP {response.status}{label}: {message}")
+                log.warning("%s", self.last_error)
+                return None
+            if isinstance(data.get("id"), str):
+                self.last_response_id = data["id"]
+            return dict(data)
+        except TimeoutError as exc:
+            self._remember_error(f"OpenAI timeout{label}: {exc}")
+            log.warning("%s", self.last_error)
+            return None
+        except aiohttp.ClientError as exc:
+            self._remember_error(f"OpenAI network error{label}: {exc}")
+            log.warning("%s", self.last_error)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            self._remember_error(f"Unexpected OpenAI error{label}: {type(exc).__name__}: {exc}")
+            log.exception("Unexpected OpenAI image generation error")
+            return None
+
+    async def _extract_image_bytes(self, payload: dict[str, Any]) -> bytes | None:
+        data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            return None
+        first = data[0]
+        if not isinstance(first, dict):
+            return None
+        b64 = first.get("b64_json") or first.get("base64") or first.get("image_base64")
+        if isinstance(b64, str) and b64.strip():
+            try:
+                return base64.b64decode(b64)
+            except Exception:  # noqa: BLE001
+                self._remember_error("Не удалось декодировать base64-картинку")
+                return None
+
+        url = first.get("url") or first.get("image_url")
+        if isinstance(url, str) and url.strip():
+            return await self._download_bytes(url.strip(), headers={"Authorization": f"Bearer {self.config.tagir_image_api_key}"})
+        return None
+
+    async def _download_bytes(self, url: str, headers: dict[str, str] | None = None) -> bytes | None:
+        await self.open()
+        assert self.session is not None
+        try:
+            async with self.session.get(url, headers=headers or {}) as response:
+                if response.status >= 400:
+                    text = await response.text()
+                    self._remember_error(f"Не удалось скачать картинку HTTP {response.status}: {text[:500]}")
+                    return None
+                return await response.read()
+        except TimeoutError as exc:
+            self._remember_error(f"Timeout при скачивании картинки: {exc}")
+            return None
+        except aiohttp.ClientError as exc:
+            self._remember_error(f"Network error при скачивании картинки: {exc}")
+            return None
+
+    async def _post_json(self, url: str, *, headers: dict[str, str], payload: dict[str, Any]) -> tuple[str, aiohttp.ClientResponse]:
+        await self.open()
+        assert self.session is not None
+        async with self.session.post(url, headers=headers, json=payload) as response:
+            raw_text = await response.text()
+            return raw_text, response
+
+    def _text_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.config.openai_api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
     def _loads_json_or_sse(self, raw_text: str) -> dict[str, Any] | None:
-        """Decode normal JSON or SSE-style streaming chunks returned by some proxies."""
         raw_text = (raw_text or "").strip()
         if not raw_text:
             return None
-
         try:
             data = json.loads(raw_text)
             return data if isinstance(data, dict) else None
@@ -287,6 +447,8 @@ class OpenAIResponder:
         text_parts: list[str] = []
         first_id: str | None = None
         model: str | None = None
+        image_b64: str | None = None
+        image_url: str | None = None
         last_event = chunks[-1]
 
         for event in chunks:
@@ -295,7 +457,6 @@ class OpenAIResponder:
             if model is None and isinstance(event.get("model"), str):
                 model = event["model"]
 
-            # Chat Completions streaming format.
             choices = event.get("choices")
             if isinstance(choices, list):
                 for choice in choices:
@@ -308,7 +469,15 @@ class OpenAIResponder:
                     if isinstance(message, dict) and isinstance(message.get("content"), str):
                         text_parts.append(message["content"])
 
-            # Responses API streaming format, just in case a proxy returns it.
+            if isinstance(event.get("data"), list):
+                for item in event["data"]:
+                    if not isinstance(item, dict):
+                        continue
+                    if image_b64 is None and isinstance(item.get("b64_json"), str):
+                        image_b64 = item["b64_json"]
+                    if image_url is None and isinstance(item.get("url"), str):
+                        image_url = item["url"]
+
             event_type = event.get("type")
             if isinstance(event_type, str) and event_type.endswith(".delta") and isinstance(event.get("delta"), str):
                 text_parts.append(event["delta"])
@@ -316,6 +485,19 @@ class OpenAIResponder:
                 text_parts.append(event["output_text"])
             if isinstance(event.get("text"), str):
                 text_parts.append(event["text"])
+
+        if image_b64 or image_url:
+            item: dict[str, Any] = {}
+            if image_b64:
+                item["b64_json"] = image_b64
+            if image_url:
+                item["url"] = image_url
+            return {
+                "id": first_id or last_event.get("id") or "streaming-image-response",
+                "object": "image",
+                "model": model or last_event.get("model"),
+                "data": [item],
+            }
 
         text = "".join(text_parts).strip()
         if text:
@@ -326,15 +508,19 @@ class OpenAIResponder:
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": text}}],
                 "output_text": text,
             }
-
         return last_event if isinstance(last_event, dict) else None
+
+    def _reset_errors(self) -> None:
+        self.last_error = None
+        self.last_errors = []
+        self.last_response_id = None
 
     def _remember_error(self, message: str) -> None:
         message = re.sub(r"sk-[A-Za-z0-9_\-]+", "sk-***", str(message))
         self.last_error = message[:1200]
         self.last_errors.append(self.last_error)
-        if len(self.last_errors) > 5:
-            self.last_errors = self.last_errors[-5:]
+        if len(self.last_errors) > 8:
+            self.last_errors = self.last_errors[-8:]
 
     def _instructions(self) -> str:
         name = self.config.tagir_name.strip() or "Тагир"
