@@ -74,6 +74,23 @@ def starts_with_tagir(text: str, name: str) -> bool:
     return bool(re.match(rf"^\s*(?:{escaped})(?=$|[\s,.:;!?\-—])", text, flags=re.IGNORECASE))
 
 
+def is_tagir_draw_request(text: str, name: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    names = {name.lower().strip() or "тагир", "тагир", "tagir"}
+    escaped = "|".join(re.escape(item) for item in sorted(names, key=len, reverse=True) if item)
+    pattern = rf"^\s*(?:{escaped})\s*[,.:;!?\-—]*\s*нарисуй(?=$|[\s,.:;!?\-—])"
+    return bool(re.match(pattern, text, flags=re.IGNORECASE))
+
+
+def extract_tagir_draw_prompt(text: str, name: str) -> str:
+    names = {name.lower().strip() or "тагир", "тагир", "tagir"}
+    escaped = "|".join(re.escape(item) for item in sorted(names, key=len, reverse=True) if item)
+    pattern = rf"^\s*(?:{escaped})\s*[,.:;!?\-—]*\s*нарисуй\s*[,.:;!?\-—]*\s*"
+    return re.sub(pattern, "", (text or "").strip(), flags=re.IGNORECASE).strip()
+
+
 def owner_keyboard(enabled: bool) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -197,7 +214,10 @@ class SglypaChannelBot:
             return
 
         if text and starts_with_tagir(text, self.config.tagir_name):
-            await self.answer_as_tagir(message, text)
+            if is_tagir_draw_request(text, self.config.tagir_name):
+                await self.draw_as_tagir(message, text)
+            else:
+                await self.answer_as_tagir(message, text)
             return
 
         # Реакции не блокируют остальную логику: если канал их запретил, бот просто продолжит жить.
@@ -493,6 +513,56 @@ class SglypaChannelBot:
             self.state.set_last_channel_message_id(int(message_id))
             self.state.save()
         return question
+
+    async def draw_as_tagir(self, message: dict[str, Any], text: str) -> None:
+        message_id = int(message.get("message_id"))
+        log.info("Тагир-картинка триггер: message_id=%s text=%r", message_id, text[:140])
+
+        if not self.openai.image_enabled:
+            reason = self.openai.image_disabled_reason() or "неизвестно"
+            msg = f"Тагир поймал запрос на картинку, но не рисует: {reason}"
+            log.warning("%s", msg)
+            await self.notify_owner(msg)
+            if self.config.tagir_error_to_channel:
+                await self.safe_channel_error_reply(message_id, "Тагир пока не умеет рисовать: проверь TAGIR_IMAGE_*.")
+            return
+
+        prompt = extract_tagir_draw_prompt(text, self.config.tagir_name)
+        reply = message.get("reply_to_message") or {}
+        replied_text = message_text(reply) or None
+        async with self.brain_lock:
+            recent = self.brain.recent_texts(limit=8)
+
+        image_path, final_prompt = await self.openai.generate_image(
+            prompt,
+            output_dir=self.config.generated_dir,
+            replied_text=replied_text,
+            recent_channel_texts=recent,
+        )
+        if image_path is None:
+            reason = self.openai.last_error or "Image API не вернул картинку"
+            log.warning("Тагир не смог сгенерировать картинку: %s", reason)
+            await self.notify_owner(
+                "⚠️ Ошибка Тагира (картинка)\n"
+                f"Модель: {self.config.tagir_image_model}\n"
+                f"Сообщение: {text[:250]}\n"
+                f"Промпт: {(final_prompt or prompt)[:400]}\n"
+                f"Причина: {reason}"
+            )
+            if self.config.tagir_error_to_channel:
+                await self.safe_channel_error_reply(message_id, "Тагир не смог нарисовать, ошибка ушла владельцу.")
+            return
+
+        sent = await self.api.send_photo(
+            self.config.channel_id,
+            image_path,
+            caption=None,
+            reply_to_message_id=message_id,
+            disable_notification=True,
+        )
+        if sent_id := sent.get("message_id"):
+            self.state.set_last_channel_message_id(int(sent_id))
+            self.state.save()
 
     async def answer_as_tagir(self, message: dict[str, Any], text: str) -> None:
         message_id = int(message.get("message_id"))
