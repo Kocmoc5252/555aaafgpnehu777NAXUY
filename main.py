@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import random
 import re
@@ -13,11 +14,13 @@ from sglypa_bot.brain import Brain, tokenize
 from sglypa_bot.config import PROJECT_ROOT, Config, load_config
 from sglypa_bot.memes import MemeGenerator
 from sglypa_bot.openai_responder import OpenAIResponder
+from sglypa_bot.search import FreeSearchClient, format_search_context, make_search_query, wants_web_search
 from sglypa_bot.state import BotState
 from sglypa_bot.telegram_api import TelegramAPIError, TelegramBotAPI
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 TRIGGER_RE = re.compile(r"(?<![а-яёa-z])бля(?![а-яёa-z])", re.IGNORECASE)
+CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.#-]*)\n([\s\S]*?)```", re.MULTILINE)
 REACTIONS = ["👍", "❤", "🤡"]
 
 log = logging.getLogger("sglypa-channel-bot")
@@ -26,6 +29,38 @@ log = logging.getLogger("sglypa-channel-bot")
 def setup_logging() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
+
+def format_tagir_answer_for_telegram(text: str) -> tuple[str, str | None]:
+    """Convert Markdown-style fenced code blocks to Telegram HTML.
+
+    Telegram will show raw triple backticks unless sendMessage gets a parse_mode.
+    HTML is safer here than MarkdownV2 because we can escape normal text and code
+    without fighting every special Markdown character.
+    """
+    if "```" not in text:
+        return text, None
+
+    parts: list[str] = []
+    last = 0
+    found = False
+    for match in CODE_FENCE_RE.finditer(text):
+        found = True
+        parts.append(html.escape(text[last:match.start()]))
+        language = re.sub(r"[^a-zA-Z0-9_-]", "", match.group(1).strip())[:32]
+        code = match.group(2).strip("\n")
+        escaped_code = html.escape(code)
+        if language:
+            parts.append(f'<pre><code class="language-{language}">{escaped_code}</code></pre>')
+        else:
+            parts.append(f"<pre>{escaped_code}</pre>")
+        last = match.end()
+
+    if not found:
+        return text, None
+
+    parts.append(html.escape(text[last:]))
+    return "".join(parts), "HTML"
 
 
 def message_text(message: dict[str, Any]) -> str:
@@ -132,6 +167,7 @@ class SglypaChannelBot:
             font_path=config.font_path,
         )
         self.openai = OpenAIResponder(config)
+        self.search = FreeSearchClient(config)
         self.brain_lock = asyncio.Lock()
         self.offset: int | None = None
         self.last_admin_refresh = 0.0
@@ -155,6 +191,7 @@ class SglypaChannelBot:
                 with contextlib_suppress(asyncio.CancelledError):
                     await background_task
                 await self.openai.close()
+                await self.search.close()
 
     async def polling_loop(self) -> None:
         allowed_updates = ["message", "channel_post", "edited_channel_post", "callback_query"]
@@ -582,7 +619,22 @@ class SglypaChannelBot:
         async with self.brain_lock:
             recent = self.brain.recent_texts(limit=8)
 
-        answer = await self.openai.answer(text, replied_text=replied_text, recent_channel_texts=recent)
+        web_context = None
+        if self.search.enabled and wants_web_search(text, always=self.config.search_always):
+            query = make_search_query(text, self.config.tagir_name)
+            results = await self.search.search(query)
+            web_context = format_search_context(results)
+            if web_context:
+                log.info("Веб-поиск для Тагира: query=%r results=%s", query, len(results))
+            else:
+                log.info("Веб-поиск для Тагира ничего не дал: query=%r error=%r", query, self.search.last_error)
+
+        answer = await self.openai.answer(
+            text,
+            replied_text=replied_text,
+            recent_channel_texts=recent,
+            web_context=web_context,
+        )
         if not answer:
             reason = self.openai.last_error or "OpenAI не вернул текст"
             log.warning("Тагир не смог получить ответ: %s", reason)
@@ -596,11 +648,13 @@ class SglypaChannelBot:
                 await self.safe_channel_error_reply(message_id, "Тагир сейчас сломался, ошибка ушла владельцу.")
             return
 
+        formatted_answer, parse_mode = format_tagir_answer_for_telegram(answer)
         sent = await self.api.send_message(
             self.config.channel_id,
-            answer,
+            formatted_answer,
             reply_to_message_id=message_id,
             disable_notification=True,
+            parse_mode=parse_mode,
         )
         if sent_id := sent.get("message_id"):
             self.state.set_last_channel_message_id(int(sent_id))
