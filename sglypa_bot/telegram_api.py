@@ -162,6 +162,30 @@ class TelegramBotAPI:
             )
         )
 
+    async def send_video(
+        self,
+        chat_id: int | str,
+        video_path: str | Path,
+        *,
+        caption: str | None = None,
+        reply_to_message_id: int | None = None,
+        disable_notification: bool | None = None,
+    ) -> dict[str, Any]:
+        reply_parameters = {"message_id": reply_to_message_id} if reply_to_message_id else None
+        return dict(
+            await self.call(
+                "sendVideo",
+                {
+                    "chat_id": chat_id,
+                    "caption": caption[:1024] if caption else None,
+                    "reply_parameters": reply_parameters,
+                    "disable_notification": disable_notification,
+                    "supports_streaming": True,
+                },
+                files={"video": video_path},
+            )
+        )
+
     async def send_poll(
         self,
         chat_id: int | str,
