@@ -89,6 +89,7 @@ class Config:
     search_max_results: int = 5
     search_timeout_seconds: int = 12
     search_always: bool = False
+    search_debug_to_owner: bool = True
     search_searxng_urls: list[str] | None = None
 
 
@@ -166,5 +167,6 @@ def load_config() -> Config:
         search_max_results=max(1, min(8, _env_int("SEARCH_MAX_RESULTS", 5))),
         search_timeout_seconds=max(5, _env_int("SEARCH_TIMEOUT_SECONDS", 12)),
         search_always=_env_bool("SEARCH_ALWAYS", False),
+        search_debug_to_owner=_env_bool("SEARCH_DEBUG_TO_OWNER", True),
         search_searxng_urls=searxng_urls,
     )
