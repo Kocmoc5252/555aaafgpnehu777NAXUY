@@ -84,10 +84,14 @@ class OpenAIResponder:
 
         recent_context = self._format_recent_context(recent_channel_texts or [])
         reply_context = f"\nСообщение, на которое ответили: {replied_text[:800]}" if replied_text else ""
+        web_block = ""
+        if web_context and web_context.strip():
+            web_block = "\n\n" + web_context.strip()[:3500]
 
         input_text = (
             f"Сообщение в канале, обращение к тебе: {clean_question}"
             f"{reply_context}"
+            f"{web_block}"
             f"{recent_context}"
         )
 
