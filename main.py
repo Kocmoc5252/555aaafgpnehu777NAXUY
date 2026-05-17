@@ -659,33 +659,57 @@ class SglypaChannelBot:
                         f"Время: {elapsed:.1f}с"
                     )
 
+        await self.notify_owner(
+            "🧠 Тагир отправляет запрос в нейронку\n"
+            f"Сообщение: {text[:300]}\n"
+            f"Есть web_context: {'да' if web_context else 'нет'}"
+        )
+
         answer = await self.openai.answer(
             text,
             replied_text=replied_text,
             recent_channel_texts=recent,
             web_context=web_context,
         )
+
         if not answer:
             reason = self.openai.last_error or "OpenAI не вернул текст"
             log.warning("Тагир не смог получить ответ: %s", reason)
             await self.notify_owner(
-                "⚠️ Ошибка Тагира\n"
+                "❌ Нейронка не вернула ответ\n"
                 f"Модель: {self.config.openai_model}\n"
-                f"Сообщение: {text[:250]}\n"
-                f"Причина: {reason}"
+                f"Сообщение: {text[:300]}\n"
+                f"Ошибка: {reason}"
             )
             if self.config.tagir_error_to_channel:
                 await self.safe_channel_error_reply(message_id, "Тагир сейчас сломался, ошибка ушла владельцу.")
             return
 
-        formatted_answer, parse_mode = format_tagir_answer_for_telegram(answer)
-        sent = await self.api.send_message(
-            self.config.channel_id,
-            formatted_answer,
-            reply_to_message_id=message_id,
-            disable_notification=True,
-            parse_mode=parse_mode,
+        await self.notify_owner(
+            "✅ Нейронка ответила\n"
+            f"Длина ответа: {len(answer)}\n"
+            f"Ответ: {answer[:500]}"
         )
+
+        formatted_answer, parse_mode = format_tagir_answer_for_telegram(answer)
+        try:
+            sent = await self.api.send_message(
+                self.config.channel_id,
+                formatted_answer,
+                reply_to_message_id=message_id,
+                disable_notification=True,
+                parse_mode=parse_mode,
+            )
+            await self.notify_owner("✅ Ответ отправлен в канал")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Тагир получил ответ, но не смог отправить его в канал")
+            await self.notify_owner(
+                "❌ Ошибка отправки в канал\n"
+                f"{type(exc).__name__}: {exc}\n"
+                f"Ответ был: {answer[:700]}"
+            )
+            return
+
         if sent_id := sent.get("message_id"):
             self.state.set_last_channel_message_id(int(sent_id))
             self.state.save()
