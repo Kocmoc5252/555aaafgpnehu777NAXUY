@@ -21,6 +21,7 @@ from sglypa_bot.telegram_api import TelegramAPIError, TelegramBotAPI
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 TRIGGER_RE = re.compile(r"(?<![а-яёa-z])бля(?![а-яёa-z])", re.IGNORECASE)
+AURA_RE = re.compile(r"(?<![а-яёa-z])аура(?![а-яёa-z])", re.IGNORECASE)
 CODE_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+.#-]*)\n([\s\S]*?)```", re.MULTILINE)
 REACTIONS = ["👍", "❤", "🤡"]
 
@@ -99,6 +100,10 @@ def alias_from_message(message: dict[str, Any]) -> str | None:
 def has_meme_trigger(text: str) -> bool:
     lower = text.lower()
     return "сделай мем" in lower or "сделай мемчик" in lower or "делай мем" in lower or bool(TRIGGER_RE.search(lower))
+
+
+def has_aura_trigger(text: str) -> bool:
+    return bool(AURA_RE.search(text or ""))
 
 
 def starts_with_tagir(text: str, name: str) -> bool:
@@ -249,6 +254,10 @@ class SglypaChannelBot:
                 log.info("Выучено слов: %s из message_id=%s", learned, message_id)
 
         if edited or not self.state.enabled:
+            return
+
+        if text and has_aura_trigger(text):
+            await self.send_aura_video(reply_to_message_id=message_id)
             return
 
         if text and starts_with_tagir(text, self.config.tagir_name):
@@ -463,6 +472,65 @@ class SglypaChannelBot:
             self.brain.save()
         await self.send_channel_message(text, reply_to_message_id=reply_to_message_id)
         return text
+
+    def aura_video_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+        # Поддерживаем оба варианта имён:
+        # memes/varvar1.mp4 ... varvar4.mp4
+        # memes/varvar(1).mp4 ... varvar(4).mp4
+        for index in range(1, 5):
+            for name in (
+                f"varvar{index}.mp4",
+                f"varvar({index}).mp4",
+                f"varvar_{index}.mp4",
+                f"varvar-{index}.mp4",
+                f"varvar {index}.mp4",
+            ):
+                path = self.config.memes_dir / name
+                if path.exists() and path.is_file():
+                    candidates.append(path)
+
+        # Фолбэк на случай, если файлы названы чуть иначе, но начинаются с varvar.
+        if not candidates:
+            candidates = sorted(
+                path
+                for path in self.config.memes_dir.glob("varvar*.mp4")
+                if path.is_file()
+            )[:4]
+
+        # Убираем дубли, если файл совпал по нескольким вариантам имени.
+        unique: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(path)
+        return unique
+
+    async def send_aura_video(self, *, reply_to_message_id: int | None = None) -> Path | None:
+        videos = self.aura_video_candidates()
+        if not videos:
+            await self.notify_owner(
+                "⚠️ Аура-триггер сработал, но видео не найдены.\n"
+                "Положи файлы в папку memes: varvar1.mp4 ... varvar4.mp4 "
+                "или varvar(1).mp4 ... varvar(4).mp4"
+            )
+            return None
+
+        video_path = random.choice(videos)
+        sent = await self.api.send_video(
+            self.config.channel_id,
+            video_path,
+            caption=None,
+            reply_to_message_id=reply_to_message_id,
+            disable_notification=True,
+        )
+        if message_id := sent.get("message_id"):
+            self.state.set_last_channel_message_id(int(message_id))
+            self.state.save()
+        return video_path
 
     async def send_random_meme(self, *, source_text: str | None = None, reply_to_message_id: int | None = None) -> Path | None:
         async with self.brain_lock:
