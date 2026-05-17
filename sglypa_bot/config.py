@@ -84,6 +84,12 @@ class Config:
     tagir_image_quality: str = "auto"
     tagir_image_prompt_model: str = "gpt-5.5"
     tagir_image_enhance_prompt: bool = True
+    search_enabled: bool = False
+    search_provider: str = "auto"
+    search_max_results: int = 5
+    search_timeout_seconds: int = 12
+    search_always: bool = False
+    search_searxng_urls: list[str] | None = None
 
 
 def load_config() -> Config:
@@ -113,6 +119,8 @@ def load_config() -> Config:
 
     tagir_image_api_key = _env_str("TAGIR_IMAGE_API_KEY", "") or openai_api_key
     tagir_image_base_url = _env_str("TAGIR_IMAGE_BASE_URL", "").rstrip("/") or openai_base_url
+    raw_searxng_urls = _env_str("SEARCH_SEARXNG_URLS", "")
+    searxng_urls = [item.strip().rstrip("/") for item in raw_searxng_urls.split(",") if item.strip()] or None
 
     return Config(
         bot_token=token,
@@ -153,4 +161,10 @@ def load_config() -> Config:
         tagir_image_quality=_env_str("TAGIR_IMAGE_QUALITY", "auto") or "auto",
         tagir_image_prompt_model=_env_str("TAGIR_IMAGE_PROMPT_MODEL", _env_str("TAGIR_IMAGE_MODEL", "gpt-5.5")) or "gpt-5.5",
         tagir_image_enhance_prompt=_env_bool("TAGIR_IMAGE_ENHANCE_PROMPT", True),
+        search_enabled=_env_bool("SEARCH_ENABLED", False),
+        search_provider=(_env_str("SEARCH_PROVIDER", "auto") or "auto").lower(),
+        search_max_results=max(1, min(8, _env_int("SEARCH_MAX_RESULTS", 5))),
+        search_timeout_seconds=max(5, _env_int("SEARCH_TIMEOUT_SECONDS", 12)),
+        search_always=_env_bool("SEARCH_ALWAYS", False),
+        search_searxng_urls=searxng_urls,
     )
