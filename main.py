@@ -15,6 +15,7 @@ from sglypa_bot.config import PROJECT_ROOT, Config, load_config
 from sglypa_bot.memes import MemeGenerator
 from sglypa_bot.openai_responder import OpenAIResponder
 from sglypa_bot.search import FreeSearchClient, format_search_context, make_search_query, wants_web_search
+from sglypa_bot.live_data import fetch_live_context
 from sglypa_bot.state import BotState
 from sglypa_bot.telegram_api import TelegramAPIError, TelegramBotAPI
 
@@ -619,7 +620,19 @@ class SglypaChannelBot:
         async with self.brain_lock:
             recent = self.brain.recent_texts(limit=8)
 
-        web_context = None
+        web_context_parts: list[str] = []
+        live_context = await fetch_live_context(text, timeout_seconds=min(10, self.config.search_timeout_seconds))
+        if live_context:
+            web_context_parts.append(live_context.text)
+            log.info("Прямые данные для Тагира: source=%s text=%r", live_context.source, live_context.text[:220])
+            if self.config.search_debug_to_owner:
+                await self.notify_owner(
+                    "📌 Тагир получил точные данные\n"
+                    f"Источник: {live_context.source}\n"
+                    f"{live_context.text[:500]}"
+                )
+
+        web_context = "\n\n".join(web_context_parts) if web_context_parts else None
         if self.search.enabled and wants_web_search(text, always=self.config.search_always):
             query = make_search_query(text, self.config.tagir_name)
             started = time.monotonic()
@@ -638,8 +651,10 @@ class SglypaChannelBot:
                 results = []
                 self.search.last_error = f"search timeout after {self.config.search_timeout_seconds}s"
             elapsed = time.monotonic() - started
-            web_context = format_search_context(results)
-            if web_context:
+            search_context = format_search_context(results)
+            if search_context:
+                web_context_parts.append(search_context)
+                web_context = "\n\n".join(web_context_parts)
                 log.info("Веб-поиск для Тагира: query=%r results=%s elapsed=%.1fs", query, len(results), elapsed)
                 if self.config.search_debug_to_owner:
                     preview = "\n".join(f"{i}. {item.title[:120]}" for i, item in enumerate(results[:3], start=1))
