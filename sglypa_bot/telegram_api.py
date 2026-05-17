@@ -121,6 +121,7 @@ class TelegramBotAPI:
         reply_to_message_id: int | None = None,
         reply_markup: dict[str, Any] | None = None,
         disable_notification: bool | None = None,
+        parse_mode: str | None = None,
     ) -> dict[str, Any]:
         text = text[:4096]
         reply_parameters = {"message_id": reply_to_message_id} if reply_to_message_id else None
@@ -133,6 +134,7 @@ class TelegramBotAPI:
                     "reply_parameters": reply_parameters,
                     "reply_markup": reply_markup,
                     "disable_notification": disable_notification,
+                    "parse_mode": parse_mode,
                 },
             )
         )
