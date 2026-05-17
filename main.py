@@ -622,12 +622,42 @@ class SglypaChannelBot:
         web_context = None
         if self.search.enabled and wants_web_search(text, always=self.config.search_always):
             query = make_search_query(text, self.config.tagir_name)
-            results = await self.search.search(query)
+            started = time.monotonic()
+            if self.config.search_debug_to_owner:
+                await self.notify_owner(
+                    "🔎 Тагир ищет в интернете\n"
+                    f"Провайдер: {self.config.search_provider}\n"
+                    f"Запрос: {query[:300]}"
+                )
+            try:
+                results = await asyncio.wait_for(
+                    self.search.search(query),
+                    timeout=max(5, self.config.search_timeout_seconds),
+                )
+            except asyncio.TimeoutError:
+                results = []
+                self.search.last_error = f"search timeout after {self.config.search_timeout_seconds}s"
+            elapsed = time.monotonic() - started
             web_context = format_search_context(results)
             if web_context:
-                log.info("Веб-поиск для Тагира: query=%r results=%s", query, len(results))
+                log.info("Веб-поиск для Тагира: query=%r results=%s elapsed=%.1fs", query, len(results), elapsed)
+                if self.config.search_debug_to_owner:
+                    preview = "\n".join(f"{i}. {item.title[:120]}" for i, item in enumerate(results[:3], start=1))
+                    await self.notify_owner(
+                        "✅ Поиск сработал\n"
+                        f"Запрос: {query[:250]}\n"
+                        f"Найдено: {len(results)} за {elapsed:.1f}с\n"
+                        f"{preview}"
+                    )
             else:
-                log.info("Веб-поиск для Тагира ничего не дал: query=%r error=%r", query, self.search.last_error)
+                log.info("Веб-поиск для Тагира ничего не дал: query=%r error=%r elapsed=%.1fs", query, self.search.last_error, elapsed)
+                if self.config.search_debug_to_owner:
+                    await self.notify_owner(
+                        "⚠️ Поиск ничего не дал\n"
+                        f"Запрос: {query[:250]}\n"
+                        f"Ошибка: {self.search.last_error or 'результатов нет'}\n"
+                        f"Время: {elapsed:.1f}с"
+                    )
 
         answer = await self.openai.answer(
             text,
